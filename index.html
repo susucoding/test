@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>超级马里奥 - 小游戏</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #222;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #fff;
+    }
+    canvas {
+      background: linear-gradient(#6ec6ff, #88e0ff 40%, #4caf50 40%, #3e8e41 100%);
+      border: 3px solid #fff;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="800" height="450"></canvas>
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    // 逻辑坐标系大小（游戏内部仍按 800×450 运算）
+    const GAME_WIDTH = 800;
+    const GAME_HEIGHT = 450;
+    // 在更大的画布上以 2 倍缩放绘制，让画面更大且更清晰
+    const SCALE = 2;
+
+    // 实际画布像素尺寸放大到 1600×900
+    canvas.width = GAME_WIDTH * SCALE;
+    canvas.height = GAME_HEIGHT * SCALE;
+
+    const groundY = 380; // 地面高度
+    const gravity = 0.6;
+    const moveSpeed = 3.2;
+    const jumpSpeed = -13;
+
+    const mario = {
+      x: 80,
+      y: groundY - 32,
+      vx: 0,
+      vy: 0,
+      w: 26,
+      h: 32,
+      onGround: true,
+    };
+
+    const keys = {
+      left: false,
+      right: false,
+      jump: false,
+    };
+
+    // 顶砖后弹出的图片资源
+    const pics = {
+      pic1: new Image(),
+      pic2: new Image(),
+      pic3: new Image(),
+    };
+    pics.pic1.src = 'pic1.png';
+    pics.pic2.src = 'pic2.png';
+    pics.pic3.src = 'pic3.png';
+
+    // 三个砖头：分别对应 pic1、pic2、pic3（横向拉远一点）
+    const bricks = [
+      { x: 220, y: 270, w: 40, h: 24, type: 'pic1', hit: false },
+      { x: 420, y: 270, w: 40, h: 24, type: 'pic2', hit: false },
+      { x: 620, y: 270, w: 40, h: 24, type: 'pic3', hit: false },
+    ];
+
+    // 记录每张图片是否已被顶出
+    const revealedPics = {
+      pic1: false,
+      pic2: false,
+      pic3: false,
+    };
+
+    // 每张图片在砖块上方显示的剩余帧数
+    const picDisplay = {
+      pic1: 0,
+      pic2: 0,
+      pic3: 0,
+    };
+    // 控制弹出图片在角色移动前最少显示的锁定帧数
+    let picDisplayLock = 0;
+
+    const mushrooms = []; // 保留旧逻辑的数组，占位不用
+    let coinCount = 0;
+    let mushroomCount = 0;
+
+    const levelEndX = 720; // 到达这里算通关（只有一关）
+    let gameOver = false;
+
+    // 简单的文字提示动画
+    const popups = [];
+
+    function rectIntersect(a, b) {
+      return !(
+        a.x + a.w <= b.x ||
+        a.x >= b.x + b.w ||
+        a.y + a.h <= b.y ||
+        a.y >= b.y + b.h
+      );
+    }
+
+    // 输入处理
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
+      if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+        keys.jump = true;
+      }
+      if (gameOver && e.code === 'Enter') {
+        // 回车重新开始
+        resetGame();
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+      if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+        keys.jump = false;
+      }
+    });
+
+    function resetGame() {
+      mario.x = 80;
+      mario.y = groundY - mario.h;
+      mario.vx = 0;
+      mario.vy = 0;
+      mario.onGround = true;
+      bricks.forEach((b) => (b.hit = false));
+      revealedPics.pic1 = false;
+      revealedPics.pic2 = false;
+      revealedPics.pic3 = false;
+      picDisplay.pic1 = 0;
+      picDisplay.pic2 = 0;
+      picDisplay.pic3 = 0;
+      mushrooms.length = 0;
+      coinCount = 0;
+      mushroomCount = 0;
+      popups.length = 0;
+      gameOver = false;
+    }
+
+    function updateMario() {
+      if (gameOver) return;
+
+      // 记录本帧开始时是否有弹出图片正在显示
+      const hadPicDisplay =
+        picDisplay.pic1 > 0 || picDisplay.pic2 > 0 || picDisplay.pic3 > 0;
+
+      mario.vx = 0;
+      if (keys.left) mario.vx -= moveSpeed;
+      if (keys.right) mario.vx += moveSpeed;
+
+      // 如果此时玩家有按键移动/跳跃，并且之前有弹出图片
+      // 只有在锁定时间结束后，才会因为移动而强制让图片消失
+      const tryingToMove = keys.left || keys.right || keys.jump;
+      if (hadPicDisplay && tryingToMove && picDisplayLock === 0) {
+        picDisplay.pic1 = 0;
+        picDisplay.pic2 = 0;
+        picDisplay.pic3 = 0;
+      }
+
+      if (keys.jump && mario.onGround) {
+        mario.vy = jumpSpeed;
+        mario.onGround = false;
+      }
+
+      mario.vy += gravity;
+
+      const prevY = mario.y;
+
+      mario.x += mario.vx;
+      mario.y += mario.vy;
+
+      // 简单地面碰撞
+      if (mario.y + mario.h >= groundY) {
+        mario.y = groundY - mario.h;
+        mario.vy = 0;
+        mario.onGround = true;
+      }
+
+      // 水平边界（按逻辑宽度限制）
+      if (mario.x < 0) mario.x = 0;
+      if (mario.x + mario.w > GAME_WIDTH) mario.x = GAME_WIDTH - mario.w;
+
+      // 顶砖逻辑：从下往上撞到砖块底部
+      bricks.forEach((brick) => {
+        if (mario.vy < 0) {
+          const prevBottom = prevY + mario.h;
+          const nowBottom = mario.y + mario.h;
+          const hitFromBelow =
+            prevBottom >= brick.y + brick.h &&
+            nowBottom  <= brick.y + brick.h &&
+            mario.x + mario.w > brick.x + 4 &&
+            mario.x < brick.x + brick.w - 4;
+
+          if (hitFromBelow) {
+            mario.y = brick.y + brick.h - mario.h + 0.5;
+            mario.vy = 0;
+
+            if (!brick.hit) {
+              brick.hit = true;
+
+              if (brick.type === 'pic1' || brick.type === 'pic2' || brick.type === 'pic3') {
+                revealedPics[brick.type] = true; // 用于结算页汇总
+                picDisplay[brick.type] = 90;     // 在砖块上方短暂显示约 1.5 秒
+                picDisplayLock = 20;             // 给几帧定期显示，防止立即移动就立即消失
+                popups.push({
+                  x: brick.x + brick.w / 2,
+                  y: brick.y - 10,
+                  text: brick.type.toUpperCase() + '!',
+                  life: 40,
+                });
+              }
+            }
+          }
+        }
+      });
+
+      // 通关检测（只有这一关）
+      if (mario.x + mario.w >= levelEndX && !gameOver) {
+        gameOver = true;
+      }
+    }
+
+    function updateMushrooms() {
+      mushrooms.forEach((m) => {
+        if (m.collected) return;
+        m.vy += gravity * 0.7;
+        m.y += m.vy;
+        if (m.y + m.h >= groundY) {
+          m.y = groundY - m.h;
+          m.vy = 0;
+        }
+
+        if (
+          rectIntersect(
+            { x: mario.x, y: mario.y, w: mario.w, h: mario.h },
+            { x: m.x, y: m.y, w: m.w, h: m.h },
+          ) &&
+          !m.collected &&
+          !gameOver
+        ) {
+          m.collected = true;
+          mushroomCount++;
+          popups.push({
+            x: m.x + m.w / 2,
+            y: m.y - 10,
+            text: '+1 mushroom',
+            life: 40,
+          });
+        }
+      });
+    }
+
+    function updatePopups() {
+      for (let i = popups.length - 1; i >= 0; i--) {
+        const p = popups[i];
+        p.y -= 0.6;
+        p.life--;
+        if (p.life <= 0) popups.splice(i, 1);
+      }
+
+      // 同步更新每张图片在砖块上方显示的剩余帧数
+      picDisplay.pic1 = Math.max(0, picDisplay.pic1 - 1);
+      picDisplay.pic2 = Math.max(0, picDisplay.pic2 - 1);
+      picDisplay.pic3 = Math.max(0, picDisplay.pic3 - 1);
+
+      // 控制人物移动触发的强制消失也不要太快
+      if (picDisplayLock > 0) {
+        picDisplayLock--;
+      }
+    }
+
+    function drawBackground() {
+      // 天空
+      ctx.fillStyle = '#5c94fc';
+      ctx.fillRect(0, 0, GAME_WIDTH, groundY);
+
+      // 远处小山
+      const hillBaseY = groundY;
+      ctx.fillStyle = '#3ab54a';
+      ctx.beginPath();
+      ctx.moveTo(80, hillBaseY);
+      ctx.quadraticCurveTo(140, hillBaseY - 80, 200, hillBaseY);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(260, hillBaseY);
+      ctx.quadraticCurveTo(340, hillBaseY - 110, 420, hillBaseY);
+      ctx.fill();
+
+      // 灌木
+      ctx.fillStyle = '#2e8b3a';
+      ctx.beginPath();
+      ctx.arc(520, hillBaseY - 18, 14, Math.PI, 0);
+      ctx.arc(540, hillBaseY - 18, 14, Math.PI, 0);
+      ctx.arc(560, hillBaseY - 18, 14, Math.PI, 0);
+      ctx.fill();
+
+      // 云朵
+      function drawCloud(cx, cy, scale) {
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(cx, cy, 10 * scale, Math.PI * 0.5, Math.PI * 1.5);
+        ctx.arc(cx + 10 * scale, cy - 8 * scale, 10 * scale, Math.PI, Math.PI * 2);
+        ctx.arc(cx + 22 * scale, cy - 4 * scale, 8 * scale, Math.PI, Math.PI * 2);
+        ctx.arc(cx + 30 * scale, cy + 2 * scale, 10 * scale, Math.PI * 1.5, Math.PI * 0.5);
+        ctx.closePath();
+        ctx.fill();
+      }
+      drawCloud(130, 80, 1.1);
+      drawCloud(360, 60, 0.9);
+      drawCloud(640, 90, 1.0);
+
+      // 地面方块带（按逻辑宽高铺满，再整体放大）
+      const tileSize = 32;
+      for (let x = 0; x < GAME_WIDTH; x += tileSize) {
+        ctx.fillStyle = '#c97f2a';
+        ctx.fillRect(x, groundY, tileSize, GAME_HEIGHT - groundY);
+        ctx.fillStyle = '#a05a17';
+        ctx.fillRect(x, groundY, tileSize, 6);
+        ctx.strokeStyle = '#8a4b0f';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, groundY + 0.5, tileSize - 1, GAME_HEIGHT - groundY - 1);
+      }
+
+      // 终点旗杆
+      ctx.fillStyle = '#ddd';
+      ctx.fillRect(levelEndX, groundY - 120, 4, 120);
+      ctx.fillStyle = '#00c853';
+      ctx.beginPath();
+      ctx.moveTo(levelEndX + 4, groundY - 120);
+      ctx.lineTo(levelEndX + 40, groundY - 100);
+      ctx.lineTo(levelEndX + 4, groundY - 80);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawBricks() {
+      bricks.forEach((brick) => {
+        const isQuestion = !brick.hit; // 未被顶出的砖都画成问号砖
+
+        if (isQuestion) {
+          // 问号砖块
+          ctx.fillStyle = '#f7b733';
+          ctx.fillRect(brick.x, brick.y, brick.w, brick.h);
+          ctx.strokeStyle = '#b56a1a';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(brick.x + 1.5, brick.y + 1.5, brick.w - 3, brick.h - 3);
+
+          ctx.fillStyle = '#8b4513';
+          ctx.font = '18px monospace';
+          ctx.textBaseline = 'middle';
+          ctx.textAlign = 'center';
+          ctx.fillText('?', brick.x + brick.w / 2, brick.y + brick.h / 2 + 1);
+        } else {
+          // 普通砖块 / 被敲过的砖
+          ctx.fillStyle = '#b58a5a';
+          ctx.fillRect(brick.x, brick.y, brick.w, brick.h);
+          ctx.strokeStyle = '#8a4b0f';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(brick.x + 1.5, brick.y + 1.5, brick.w - 3, brick.h - 3);
+
+          // 中间十字分块
+          ctx.strokeStyle = '#a05a17';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(brick.x + brick.w / 2, brick.y + 3);
+          ctx.lineTo(brick.x + brick.w / 2, brick.y + brick.h - 3);
+          ctx.moveTo(brick.x + 3, brick.y + brick.h / 2);
+          ctx.lineTo(brick.x + brick.w - 3, brick.y + brick.h / 2);
+          ctx.stroke();
+        }
+
+        // 砖块本身不再负责显示图片，图片统一在屏幕中间展示
+      });
+    }
+
+    function drawMushrooms() {
+      mushrooms.forEach((m) => {
+        if (m.collected) return;
+
+        // 白色底座
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(m.x + 3, m.y + m.h - 6, m.w - 6, 6);
+
+        // 红色蘑菇帽
+        ctx.beginPath();
+        ctx.fillStyle = '#ff3c28';
+        ctx.arc(m.x + m.w / 2, m.y + 8, m.w / 2, Math.PI, 0);
+        ctx.fill();
+
+        // 白色圆点
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(m.x + m.w / 2 - 4, m.y + 6, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(m.x + m.w / 2 + 4, m.y + 6, 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawMario() {
+      const px = mario.x;
+      const py = mario.y;
+
+      // 鞋子
+      ctx.fillStyle = '#5b3c11';
+      ctx.fillRect(px + 2, py + mario.h - 4, 9, 4);
+      ctx.fillRect(px + mario.w - 11, py + mario.h - 4, 9, 4);
+
+      // 裤子（蓝色背带裤）
+      ctx.fillStyle = '#1e5ed8';
+      ctx.fillRect(px + 4, py + 12, mario.w - 8, 14);
+      ctx.fillRect(px + 4, py + 20, 6, 8);
+      ctx.fillRect(px + mario.w - 10, py + 20, 6, 8);
+
+      // 肩部与手臂（肉色）
+      ctx.fillStyle = '#ffcc80';
+      ctx.fillRect(px + 2, py + 12, 6, 6);
+      ctx.fillRect(px + mario.w - 8, py + 12, 6, 6);
+
+      // 上衣（红色）
+      ctx.fillStyle = '#e53935';
+      ctx.fillRect(px + 5, py + 10, mario.w - 10, 8);
+      ctx.fillRect(px + 6, py + 14, mario.w - 12, 4);
+
+      // 肩带上的纽扣
+      ctx.fillStyle = '#ffeb3b';
+      ctx.fillRect(px + 7, py + 16, 3, 3);
+      ctx.fillRect(px + mario.w - 10, py + 16, 3, 3);
+
+      // 头（肉色）
+      ctx.fillStyle = '#ffcc80';
+      ctx.fillRect(px + 4, py, mario.w - 8, 10);
+
+      // 帽子（红色）
+      ctx.fillStyle = '#c62828';
+      ctx.fillRect(px + 2, py - 2, mario.w - 4, 5);
+      ctx.fillRect(px + 3, py - 4, mario.w - 6, 4);
+
+      // 鼻子
+      ctx.fillStyle = '#e0a86b';
+      ctx.fillRect(px + mario.w / 2, py + 4, 3, 3);
+
+      // 眼睛
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(px + 6, py + 3, 1.5, 2);
+      ctx.fillRect(px + 9, py + 3, 1.5, 2);
+    }
+
+    function drawHUD() {
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fillRect(0, 0, GAME_WIDTH, 40);
+
+      ctx.fillStyle = '#fff';
+      ctx.font = '16px monospace';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Move: ← →  Jump: 空格/↑/W', 16, 18);
+
+      ctx.font = '12px monospace';
+      ctx.fillText('Hit bricks to reveal pic1, pic2, pic3', 16, 32);
+    }
+
+    function drawPopups() {
+      ctx.font = '14px monospace';
+      ctx.textBaseline = 'bottom';
+      popups.forEach((p) => {
+        const alpha = Math.max(0, p.life / 40);
+        ctx.fillStyle = 'rgba(255,255,255,' + alpha.toFixed(2) + ')';
+        ctx.fillText(p.text, p.x - 30, p.y);
+      });
+    }
+
+    // 在砖头水平线上方的一条空白带中，居中展示当前被顶出的图片
+    function drawCenterPics() {
+      const padding = 12;
+
+      const active = [];
+      if (picDisplay.pic1 > 0 && pics.pic1.complete) active.push({ key: 'pic1', img: pics.pic1 });
+      if (picDisplay.pic2 > 0 && pics.pic2.complete) active.push({ key: 'pic2', img: pics.pic2 });
+      if (picDisplay.pic3 > 0 && pics.pic3.complete) active.push({ key: 'pic3', img: pics.pic3 });
+      if (active.length === 0) return;
+
+      let totalWidth = 0;
+      let maxH = 0;
+      const scale = 0.8; // 弹出图片统一缩放到原来的 0.8 倍
+      const items = active.map((item) => {
+        const iw = item.img.naturalWidth || item.img.width;
+        const ih = item.img.naturalHeight || item.img.height;
+        const w = iw * scale;
+        const h = ih * scale;
+        totalWidth += w;
+        if (h > maxH) maxH = h;
+        return { ...item, w, h };
+      });
+      totalWidth += padding * (items.length - 1);
+
+      const centerX = GAME_WIDTH / 2;
+      // 找到所有砖块中最高的一块的 y，用它上方的空白带来展示图片
+      const bricksTop = bricks.reduce((min, b) => Math.min(min, b.y), bricks[0].y);
+      // 把整排图片放在砖块上缘之上 16 像素处，同时避免贴太近 HUD
+      const baseY = Math.max(50, bricksTop - maxH - 16);
+
+      let startX = centerX - totalWidth / 2;
+      items.forEach((item) => {
+        const x = startX;
+        const y = baseY;
+        ctx.drawImage(item.img, x, y, item.w, item.h);
+        startX += item.w + padding;
+      });
+    }
+
+    function drawGameOver() {
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(80, 60, 640, 320);
+
+      ctx.fillStyle = '#fff';
+      ctx.font = '18px monospace';
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+      ctx.fillText('你完成的okr：', 120, 90);
+
+      // 单一图层里竖向逐行展示三张图片，让每张图尽量大，方便看清文字
+      // 面板位置整体靠近提示文字，左右相对大背景留出相同间距
+      const panelX = 120;
+      const panelY = 110;
+      const panelW = 560;
+      const panelH = 260;
+
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fillRect(panelX, panelY, panelW, panelH);
+
+      const entries = [
+        { img: pics.pic1, unlocked: revealedPics.pic1, label: 'pic1' },
+        { img: pics.pic2, unlocked: revealedPics.pic2, label: 'pic2' },
+        { img: pics.pic3, unlocked: revealedPics.pic3, label: 'pic3' },
+      ];
+
+      const slotCount = entries.length;
+      const rowH = panelH / slotCount;
+      const innerMargin = 8;
+
+      entries.forEach((entry, idx) => {
+        const cx = panelX + panelW / 2;
+        const cy = panelY + rowH * idx + rowH / 2;
+
+        if (entry.unlocked && entry.img && entry.img.complete) {
+          const iw = entry.img.naturalWidth || entry.img.width;
+          const ih = entry.img.naturalHeight || entry.img.height;
+          // 尽量放大到当前行可用空间内，保证图片内容清晰可见
+          const scale = Math.min(
+            (panelW - innerMargin * 2) / iw,
+            (rowH - innerMargin * 2) / ih
+          );
+          const dw = iw * scale;
+          const dh = ih * scale;
+          const dx = cx - dw / 2;
+          const dy = cy - dh / 2;
+          ctx.drawImage(entry.img, dx, dy, dw, dh);
+        } else {
+          ctx.fillStyle = 'rgba(255,255,255,0.35)';
+          ctx.font = '16px monospace';
+          ctx.textBaseline = 'middle';
+          ctx.textAlign = 'center';
+          ctx.fillText('???', cx, cy);
+        }
+      });
+
+      ctx.textAlign = 'right';
+      ctx.font = '16px monospace';
+      ctx.fillStyle = '#fff';
+      const restartY = panelY + panelH + 10; // 仍在图片面板下方
+
+      // 根据是否全部解锁 OKR 切换提示文案
+      const allUnlocked = revealedPics.pic1 && revealedPics.pic2 && revealedPics.pic3;
+      const restartText = allUnlocked
+        ? '按 Enter 重新开始'
+        : 'okr还没完成哦，按 Enter 完成 okr';
+
+      ctx.fillText(restartText, panelX + panelW, restartY);
+    }
+
+    function loop() {
+      // 先重置变换并清理放大后的整张画布
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 再把坐标系缩放到逻辑 800×450，整体以 2 倍绘制
+      ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+
+      updateMario();
+      updateMushrooms();
+      updatePopups();
+
+      drawBackground();
+      drawBricks();
+      drawMushrooms();
+      drawMario();
+      // 顶部 HUD 始终显示，保证提示文案稳定
+      drawHUD();
+      // 中间弹出图片仅在游戏过程中显示
+      if (!gameOver) {
+        drawCenterPics();
+      }
+      drawPopups();
+
+      if (gameOver) {
+        drawGameOver();
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+  </script>
+</body>
+</html>
